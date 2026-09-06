@@ -148,3 +148,43 @@ add this top-level object to your configuration:
 Re-enable with `true`. Increasing limits increases report size and browser cost.
 No external asset request is needed when opening the report; third-party
 attribution is embedded and recorded in `THIRD_PARTY.md`.
+
+
+## Organized result views and probability distributions (1.7)
+
+Use the overview's **Analysis directory** to select an analysis. In Explore results,
+choose **Traces & profiles**, **Probability distributions**, or **Replica summaries**.
+The region/observable and replica filters apply to all three views. The gallery
+filters SVGs by analysis, figure type and a region/replica search; readable titles
+appear above each image and the original filename remains in its caption.
+
+Radius of gyration, RMSD, distances, angles, SASA and other numeric time series
+receive empirical distributions automatically. Use the vertical-axis selector
+to switch between probability density (integral = 1) and probability per bin
+(sum = 1). Replicas share 32 equal-width bins over their joint finite range;
+constant observables use one enclosing bin. Each replica is normalized separately,
+so longer trajectories do not dominate a pooled curve. Missing samples are excluded
+and counted. These distributions do not establish stationarity or convergence.
+
+Circular torsions use 36 common bins on −180° to 180°; the endpoints are adjacent.
+Categorical state IDs retain probability bars/pies rather than continuous densities.
+RMSF, RDF and other spatial profiles retain their coordinate interpretation and
+are not shown as trajectory probability distributions. An RDF is already a distinct
+spatial correlation function and should not be confused with a normalized histogram.
+
+With Matplotlib, standalone density SVGs appear in `figures/distributions/`, per
+replica and as overlays. Shading is decorative; it is not a confidence interval.
+The renderer uses [Matplotlib stairs](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.stairs.html)
+to draw the exact histogram bins, with no smoothing or additional dependency.
+`reports/probability_distributions.dat` records edges, counts, sample sizes,
+probabilities, densities and units even with `--no-plots`.
+
+Regenerate existing reports from their stored numerical outputs:
+
+```text
+python mdworkbench.py report analysis_results
+```
+
+Add `--no-plots` to update only numerical/HTML outputs. SVG titles update only when
+the figures are regenerated with Matplotlib. Native data labels and source files
+remain unchanged for reproducibility.

@@ -1,6 +1,6 @@
 # Citation guidance
 
-Record CPPTRAJ Workbench version 1.6.0, its actual authors/maintainers, repository
+Record CPPTRAJ Workbench version 1.7.0, its actual authors/maintainers, repository
 URL and an archived release identifier when those are established. This local
 source bundle has no assigned DOI or claimed software publication. A machine-readable
 author list has deliberately not been fabricated.

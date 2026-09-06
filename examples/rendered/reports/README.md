@@ -24,5 +24,6 @@ None.
 - circular_statistics.dat and circular_replicate_statistics.dat: angular descriptions in degrees.
 - categorical_fractions.dat: state fractions within each replica.
 - combined/: aligned per-observable tables; blank values represent missing coordinates.
+- probability_distributions.dat: common bin edges, counts, probabilities and densities per replica; scalar time series only.
 - artifact_index.dat: every requested artifact, its source, and parse status.
 - ../figures/: editable-text SVGs; dense matrix cells and PCA points are embedded rasters at the configured DPI.

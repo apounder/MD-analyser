@@ -21,6 +21,8 @@ import numpy as np
 
 
 from .figure_style import PALETTES
+from .labels import analysis_label, readable, observable_label, series_title, unit_label, coordinate_label
+from .distributions import shared_edges, histogram, distribution_rows
 PALETTE = PALETTES["lagoon"]
 REPLICA_COLORS = {}
 
@@ -416,6 +418,7 @@ def _plotting(dpi: int, options=None):
     options = options or {}
     PALETTE = PALETTES[options.get("palette", "lagoon")]
     plt._mdwb_style = configure(plt, options, dpi)
+    plt._mdwb_figure_titles = {}
     return plt
 
 
@@ -437,13 +440,18 @@ def _save_figure(plt, figure, path: Path, files: list[str], output_dir: Path):
                 text.set_fontsize(size - 1)
     (output_dir / "reports").mkdir(parents=True, exist_ok=True)
     (output_dir / "reports" / "figure_style.json").write_text(json.dumps(style, indent=2) + "\n", encoding="utf-8")
-    figure.savefig(path, bbox_inches="tight", metadata={"Creator": "cpptraj-workbench", "Date": None})
+    titles = [figure._suptitle.get_text()] if figure._suptitle is not None else []
+    titles.extend(ax.get_title() for ax in figure.axes if ax.get_title())
+    display_title = " · ".join(dict.fromkeys(title.replace("\n", " · ") for title in titles))
+    plt._mdwb_figure_titles[str(path.relative_to(output_dir))] = display_title
+    figure.savefig(path, bbox_inches="tight", metadata={"Creator": "cpptraj-workbench", "Date": None, "Title": display_title})
     plt.close(figure)
     files.append(str(path.relative_to(output_dir)))
 
 
 def _ylabel(series: Series) -> str:
-    return f"{series.name} ({series.unit})" if series.unit else series.name
+    name = observable_label(series)
+    return f"{name} ({unit_label(series.unit)})" if series.unit else name
 
 
 def _running_average(values: np.ndarray) -> np.ndarray:
@@ -480,18 +488,18 @@ def _series_figures(plt, series_groups: dict, config: dict, output_dir: Path, fi
         if first.kind not in {"timeseries", "profile"} or first.discrete:
             continue
         stem = _safe_name("__".join(key))
-        title = f"{first.analysis} · {first.section}"
+        title = series_title(first)
         for series in group:
             fig, ax = plt.subplots(figsize=(3.5, 2.65), layout="constrained")
             ax.plot(series.x, _plot_values(series), color=_replica_color(series.replica), alpha=alpha)
-            ax.set(xlabel=series.xunit, ylabel=_ylabel(series), title=f"{title}\n{series.replica}")
+            ax.set(xlabel=coordinate_label(series.xunit), ylabel=_ylabel(series), title=series_title(series, readable(series.replica)))
             ax.grid(axis="y", color="#dddddd", linewidth=0.5, alpha=0.6)
             _save_figure(plt, fig, output_dir / "figures" / _safe_name(series.replica) / f"{stem}.svg", figure_files, output_dir)
         if len(group) > 1:
             fig, ax = plt.subplots(figsize=(7, 3.15), layout="constrained")
             for i, series in enumerate(group):
-                ax.plot(series.x, _plot_values(series), label=series.replica, color=_replica_color(series.replica), alpha=alpha, linestyle=("-", "--", ":", "-.")[(i // len(PALETTE)) % 4])
-            ax.set(xlabel=first.xunit, ylabel=_ylabel(first), title=title)
+                ax.plot(series.x, _plot_values(series), label=readable(series.replica), color=_replica_color(series.replica), alpha=alpha, linestyle=("-", "--", ":", "-.")[(i // len(PALETTE)) % 4])
+            ax.set(xlabel=coordinate_label(first.xunit), ylabel=_ylabel(first), title=series_title(first, "Replica comparison"))
             ax.legend(frameon=False, ncols=min(4, len(group)), loc="best")
             ax.grid(axis="y", color="#dddddd", linewidth=0.5, alpha=0.6)
             _save_figure(plt, fig, output_dir / "figures" / "overlays" / f"{stem}.svg", figure_files, output_dir)
@@ -503,28 +511,55 @@ def _series_figures(plt, series_groups: dict, config: dict, output_dir: Path, fi
                 offset = 0
                 for i, series in enumerate(group):
                     x = joined_x[offset:offset + len(series.x)]
-                    ax.plot(x, _plot_values(series), color=_replica_color(series.replica), alpha=alpha, label=series.replica)
+                    ax.plot(x, _plot_values(series), color=_replica_color(series.replica), alpha=alpha, label=readable(series.replica))
                     offset += len(series.x)
                 for boundary in boundaries:
                     ax.axvline(boundary, color="#555555", ls="--", lw=0.7, alpha=0.7)
-                ax.set(xlabel=f"appended {first.xunit} (display coordinate)", ylabel=_ylabel(first), title=f"{title}\nIndependent replicas appended; not a continuous trajectory")
+                ax.set(xlabel=f"Appended {first.xunit} (independent replicas; display only)", ylabel=_ylabel(first), title=series_title(first, "Replicas shown in sequence"))
                 ax.legend(frameon=False, ncols=min(4, len(group)))
                 _save_figure(plt, fig, output_dir / "figures" / "concatenated" / f"{stem}.svg", figure_files, output_dir)
-            fig, axes = plt.subplots(1, 2, figsize=(7, 2.8), layout="constrained")
+            _distribution_figures(plt, group, output_dir, figure_files, stem, alpha)
+            edges = shared_edges(group)
+            fig, axes = plt.subplots(1, 2, figsize=(7, 3.5), layout="constrained")
             for i, series in enumerate(group):
                 finite = series.values[np.isfinite(series.values)]
                 if series.circular:
                     finite = (finite + 180) % 360 - 180
                 if len(finite):
                     # Per-replica densities prevent longer runs dominating a pool.
-                    bins = np.linspace(-180, 180, 37) if series.circular else min(150, len(np.histogram_bin_edges(finite, bins="fd")) - 1) if len(finite) > 2 and np.ptp(finite) > 0 else 1
-                    axes[0].hist(finite, bins=bins, density=True, histtype="step", color=_replica_color(series.replica), alpha=alpha, label=series.replica)
-                axes[1].plot(series.x, _running_series_average(series), color=_replica_color(series.replica), alpha=alpha, label=series.replica)
-            axes[0].set(xlabel=_ylabel(first), ylabel="probability density", title="Within-replica distributions")
-            axes[1].set(xlabel=first.xunit, ylabel=f"running {'circular ' if first.circular else ''}mean: {_ylabel(first)}", title="Running averages")
+                    axes[0].hist(finite, bins=edges, density=True, histtype="step", color=_replica_color(series.replica), alpha=alpha, label=readable(series.replica))
+                axes[1].plot(series.x, _running_series_average(series), color=_replica_color(series.replica), alpha=alpha, label=readable(series.replica))
+            axes[0].set(xlabel=_ylabel(first), ylabel=_density_label(first), title="Probability density")
+            axes[1].set(xlabel=coordinate_label(first.xunit), ylabel=_ylabel(first), title="Running circular mean" if first.circular else "Running mean")
             axes[1].legend(frameon=False, ncols=1)
             fig.suptitle(title)
             _save_figure(plt, fig, output_dir / "figures" / "diagnostics" / f"{stem}.svg", figure_files, output_dir)
+
+
+def _density_label(series):
+    return f"Probability density (1 / {unit_label(series.unit)})" if series.unit else "Probability density"
+
+
+def _distribution_figures(plt, group, output_dir, files, stem, alpha):
+    edges = shared_edges(group)
+    available = [(series, histogram(series, edges)) for series in group]
+    available = [(series, data) for series, data in available if data["n_finite"]]
+    selections = [([item], readable(item[0].replica), _safe_name(item[0].replica)) for item in available]
+    if len(available) > 1:
+        selections.append((available, "Replica comparison", "overlays"))
+    for selection, context, folder in selections:
+        fig, ax = plt.subplots(figsize=(7, 3.8), layout="constrained")
+        for index, (series, data) in enumerate(selection):
+            color = _replica_color(series.replica)
+            ax.stairs(data["density"], edges, color=color, linewidth=1.7,
+                      linestyle=("-", "--", ":", "-.")[(index // len(PALETTE)) % 4],
+                      alpha=alpha, label=f"{readable(series.replica)} (n = {data['n_finite']:,})")
+            ax.stairs(data["density"], edges, color=color, fill=True, alpha=0.10)
+        ax.set(xlabel=_ylabel(group[0]), ylabel=_density_label(group[0]),
+               title=series_title(group[0], f"Probability distribution · {context}"), ylim=(0, None))
+        ax.legend(ncols=min(3, len(selection)), loc="best")
+        ax.grid(axis="y", color="#dddddd", linewidth=0.5, alpha=0.6)
+        _save_figure(plt, fig, output_dir / "figures" / "distributions" / folder / f"{stem}.svg", files, output_dir)
 
 
 def _pca_figures(plt, series_list: list[Series], output_dir: Path, files: list[str]):
@@ -550,13 +585,13 @@ def _pca_figures(plt, series_list: list[Series], output_dir: Path, files: list[s
             fig, ax = plt.subplots(figsize=(3.5, 3.05), layout="constrained")
             dots = ax.scatter(a.values[valid], b.values[valid], c=a.x[valid], cmap="viridis", s=5, alpha=0.65, linewidths=0, rasterized=True)
             fig.colorbar(dots, ax=ax, label=a.xunit)
-            ax.set(xlabel=_ylabel(a), ylabel=_ylabel(b), title=f"PCA · {section}\n{replica}")
+            ax.set(xlabel=_ylabel(a), ylabel=_ylabel(b), title=f"Principal component analysis\n{readable(section)} · {readable(replica)}")
             _save_figure(plt, fig, output_dir / "figures" / _safe_name(replica) / f"{_safe_name(section)}_pca_scatter.svg", files, output_dir)
         if len(pairs) > 1 and all(a.shared_basis and b.shared_basis for a, b, _ in pairs):
             fig, ax = plt.subplots(figsize=(3.5, 3.05), layout="constrained")
             for i, (a, b, valid) in enumerate(pairs):
                 ax.scatter(a.values[valid], b.values[valid], color=_replica_color(a.replica), s=5, alpha=0.45, linewidths=0, label=a.replica, rasterized=True)
-            ax.set(xlabel=_ylabel(pairs[0][0]), ylabel=_ylabel(pairs[0][1]), title=f"PCA · {section}\nShared pooled basis")
+            ax.set(xlabel=_ylabel(pairs[0][0]), ylabel=_ylabel(pairs[0][1]), title=f"Principal component analysis\n{readable(section)} · Shared pooled basis")
             ax.legend(frameon=False, markerscale=1.7)
             _save_figure(plt, fig, output_dir / "figures" / "overlays" / f"{_safe_name(section)}_pca_scatter.svg", files, output_dir)
 
@@ -574,7 +609,7 @@ def _cluster_figures(plt, series_list: list[Series], output_dir: Path, files: li
         axes[0].set(xlabel=series.xunit, ylabel="cluster assignment", title="Cluster assignments")
         axes[1].bar(np.arange(len(states)), counts / len(finite), color=PALETTE[0], alpha=0.8, width=0.75)
         axes[1].set(xticks=np.arange(len(states)), xticklabels=[_number(state) for state in states], xlabel="cluster", ylabel="fraction of analyzed frames", title="Within-replica populations")
-        fig.suptitle(f"{series.replica} · {series.section}")
+        fig.suptitle(series_title(series, readable(series.replica)))
         _save_figure(plt, fig, output_dir / "figures" / _safe_name(series.replica) / f"{_safe_name(series.section)}_clusters.svg", files, output_dir)
 
 
@@ -593,7 +628,7 @@ def _contact_figures(plt, tables: list, output_dir: Path, files: list[str], figu
         fig, ax = plt.subplots(figsize=(7, max(2.8, len(selected) * 0.2 + 1.1)), layout="constrained")
         ax.barh(np.arange(len(selected)), values[selected], color=PALETTE[0], alpha=0.85, height=0.75)
         labels = [table.row_labels[i].replace(";", "  ") for i in selected]
-        ax.set(yticks=np.arange(len(selected)), yticklabels=labels, xlabel="fraction of analyzed frames", title=f"{analysis} · {section} · {replica}\nUp to 20 most frequent reported contacts")
+        ax.set(yticks=np.arange(len(selected)), yticklabels=labels, xlabel="fraction of analyzed frames", title=f"{analysis_label(analysis)}\n{readable(section)} · {readable(replica)}\nMost frequent contacts (up to 20)")
         ax.set_xlim(0, max(1, float(np.max(values[selected])) * 1.02))
         ax.grid(axis="x", color="#dddddd", linewidth=0.5, alpha=0.6)
         _save_figure(plt, fig, output_dir / "figures" / _safe_name(replica) / f"{_safe_name(analysis + '__' + section)}_contact_fractions.svg", files, output_dir)
@@ -645,7 +680,7 @@ def _matrix_reports(plt, groups: dict, output_dir: Path, files: list[str], warni
             limits = (None, None)
         for matrix in matrices:
             if plot:
-                _matrix_figure(plt, matrix, output_dir / "figures" / _safe_name(matrix.replica) / f"{stem}_matrix.svg", files, output_dir, f"{matrix.analysis} · {matrix.section}\n{matrix.replica}", limits)
+                _matrix_figure(plt, matrix, output_dir / "figures" / _safe_name(matrix.replica) / f"{stem}_matrix.svg", files, output_dir, f"{analysis_label(matrix.analysis)}\n{readable(matrix.section)} · {readable(matrix.replica)}", limits)
         if len(matrices) < 2 or first.discrete:
             continue
         if not all(matrix.values.shape == first.values.shape and np.array_equal(matrix.x, first.x) and np.array_equal(matrix.y, first.y) for matrix in matrices):
@@ -663,7 +698,7 @@ def _matrix_reports(plt, groups: dict, output_dir: Path, files: list[str], warni
         for name, values in (("mean", mean), ("between_replica_sd", sd)):
             if plot:
                 aggregate = Matrix("replica summary", first.analysis, first.section, first.x, first.y, values, first.unit, "", first.matrix_type, first.xunit, first.yunit)
-                _matrix_figure(plt, aggregate, output_dir / "figures" / "matrices" / f"{stem}_{name}.svg", files, output_dir, f"{first.analysis} · {first.section}\n{name.replace('_', ' ')}; {len(matrices)} replicas", (0, None) if name != "mean" else limits, spread=name != "mean")
+                _matrix_figure(plt, aggregate, output_dir / "figures" / "matrices" / f"{stem}_{name}.svg", files, output_dir, f"{analysis_label(first.analysis)}\n{readable(first.section)}\n{readable(name)} · {len(matrices)} replicas", (0, None) if name != "mean" else limits, spread=name != "mean")
 
 
 def _series_tables(groups: dict, output_dir: Path, block_size: int, warnings: list[str]):
@@ -719,6 +754,9 @@ def _series_tables(groups: dict, output_dir: Path, block_size: int, warnings: li
     _write_table(output_dir / "reports" / "circular_statistics.dat", ("replica", "analysis", "section", "series", "n_finite", "circular_mean_degree", "resultant_length", "circular_sd_degree"), circular_rows)
     _write_table(output_dir / "reports" / "circular_replicate_statistics.dat", ("analysis", "section", "series", "n_replicas", "equal_replica_circular_mean_degree", "between_replica_resultant_length", "between_replica_circular_sd_degree"), circular_replica_rows)
     _write_table(output_dir / "reports" / "categorical_fractions.dat", ("replica", "analysis", "section", "series", "state", "count", "n_finite", "fraction"), categorical_rows)
+    _write_table(output_dir / "reports" / "probability_distributions.dat",
+                 ("replica", "analysis", "section", "series", "unit", "bin_left", "bin_right", "count",
+                  "n_finite", "probability", "probability_density", "geometry"), distribution_rows(groups))
 
 
 def _scalar_correlations(series_list: list[Series], output_dir: Path, warnings: list[str]):
@@ -755,7 +793,7 @@ def _diagnostic_figures(plt, output, files, figure_analyses):
             data = np.loadtxt(output / row["path"], skiprows=1, ndmin=2)
             ax.plot(data[:, 1], data[:, 2], label=row["replica"], color=_replica_color(row["replica"]), alpha=0.8)
         ax.axhline(0, color="#666666", linewidth=0.7)
-        ax.set(xlabel=f"Lag ({key[3]})", ylabel="Autocorrelation", title=f"{key[1]} · {key[2]}")
+        ax.set(xlabel=f"Lag ({key[3]})", ylabel="Autocorrelation", title=f"{analysis_label(key[0])} · Autocorrelation\n{readable(key[1])} · {readable(key[2])}")
         ax.legend(fontsize=8)
         token = hashlib.sha256("|".join(key).encode()).hexdigest()[:16]
         _save_figure(plt, fig, output / "figures" / "diagnostics" / f"acf_{token}.svg", files, output)
@@ -777,7 +815,7 @@ def _diagnostic_figures(plt, output, files, figure_analyses):
         positions = list(range(0, len(names), step))
         ax.set_xticks(positions, [names[i] for i in positions], rotation=45, ha="right")
         ax.set_yticks(positions, [names[i] for i in positions])
-        ax.set_title(f"{key[1]} · {key[2]}\nObserved distribution differences")
+        ax.set_title(f"{analysis_label(key[0])}\n{readable(key[1])} · {readable(key[2])}\nBetween-replica distribution differences")
         fig.colorbar(plotted, ax=ax, label="Jensen–Shannon distance (base 2)")
         token = hashlib.sha256("|".join(key).encode()).hexdigest()[:16]
         _save_figure(plt, fig, output / "figures" / "diagnostics" / f"replica_distance_{token}.svg", files, output)
@@ -970,9 +1008,10 @@ def report_results(config: dict, manifest: dict, output_dir: str | Path) -> dict
     summary["diagnostics"] = diagnostic_summary
     summary["figure_style"] = getattr(plt, "_mdwb_style", None) if plt is not None else None
     summary["figure_analyses"] = figure_analyses
+    summary["figure_titles"] = getattr(plt, "_mdwb_figure_titles", {}) if plt is not None else {}
     summary["viewer"] = "index.html"
     (output_dir / "reports" / "report_summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    lines = ["# Analysis reporting notes", "", *[f"- {note}" for note in notes], "", "## Warnings", "", *([f"- {warning}" for warning in warnings] or ["None."]), "", "## Main outputs", "", "- all_replicas.dat: one tidy TSV with replica labels and source paths.", "- descriptive_statistics.dat: per-replica descriptive statistics and contiguous block diagnostics.", "- replicate_statistics.dat: equal-weight replica mean and between-replica SD.", "- circular_statistics.dat and circular_replicate_statistics.dat: angular descriptions in degrees.", "- categorical_fractions.dat: state fractions within each replica.", "- combined/: aligned per-observable tables; blank values represent missing coordinates.", "- artifact_index.dat: every requested artifact, its source, and parse status.", "- ../figures/: editable-text SVGs; dense matrix cells and PCA points are embedded rasters at the configured DPI."]
+    lines = ["# Analysis reporting notes", "", *[f"- {note}" for note in notes], "", "## Warnings", "", *([f"- {warning}" for warning in warnings] or ["None."]), "", "## Main outputs", "", "- all_replicas.dat: one tidy TSV with replica labels and source paths.", "- descriptive_statistics.dat: per-replica descriptive statistics and contiguous block diagnostics.", "- replicate_statistics.dat: equal-weight replica mean and between-replica SD.", "- circular_statistics.dat and circular_replicate_statistics.dat: angular descriptions in degrees.", "- categorical_fractions.dat: state fractions within each replica.", "- combined/: aligned per-observable tables; blank values represent missing coordinates.", "- probability_distributions.dat: common bin edges, counts, probabilities and densities per replica; scalar time series only.", "- artifact_index.dat: every requested artifact, its source, and parse status.", "- ../figures/: editable-text SVGs; dense matrix cells and PCA points are embedded rasters at the configured DPI."]
     (output_dir / "reports" / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     from .dashboard import write_dashboard
     from .interactive_report import write_preview_data

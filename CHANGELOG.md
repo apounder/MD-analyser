@@ -1,5 +1,19 @@
 # Changes
 
+## 1.7.0 — 2026-09-05
+
+- Added an overview analysis directory, separate trace/distribution/summary views,
+  and gallery filters by analysis, figure type and region/replica text.
+- Added readable scientific SVG titles, axis labels and gallery titles while
+  preserving native data identifiers and filenames.
+- Added standalone probability-density SVGs per replica and as overlays, plus
+  `reports/probability_distributions.dat` even without Matplotlib. HTML and SVG
+  histograms share bin edges, use full finite samples, and normalize each replica
+  separately. Categorical states remain probabilities; spatial profiles are
+  excluded from temporal probability distributions.
+- Rebuilt the synthetic example and checked Python/JavaScript syntax. No test
+  suite, native CPPTRAJ calculations, Matplotlib rendering or browser checks.
+
 ## 1.6.0 — 2026-09-05
 
 - Grouped report analyses into family dropdowns, including replica statistics

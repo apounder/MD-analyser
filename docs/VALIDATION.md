@@ -1,5 +1,14 @@
 # Validation record
 
+## Version 1.7 update
+
+Reviewed shared histogram edges, per-replica normalization, circular wrapping,
+finite-sample counts, profile/categorical separation, presentation labels and
+HTML navigation. Python and report JavaScript syntax were checked. The synthetic
+example was regenerated without Matplotlib. No test suite, native CPPTRAJ run,
+browser/WebGL check or Matplotlib figure rendering was performed; visual appearance
+remains unverified. No packages were installed.
+
 ## Version 1.6 update
 
 Code review covered dropdown grouping, bounded PDB embedding, optional native

@@ -1,7 +1,7 @@
 # CPPTRAJ Workbench
 
 A guided, reproducible workflow for protein, DNA/RNA and mixed-system MD analysis
-with CPPTRAJ. Version **1.6.0**.
+with CPPTRAJ. Version **1.7.0**.
 
 ## Quick start
 
@@ -19,6 +19,9 @@ The wizard discovers topology/trajectory files, asks how to group replicas and
 segments, explains selections, and saves a reusable configuration. Use its saved
 filename in the run command. Omit `--quick` for the full guided setup.
 
+For clusters, copy only `mdworkbench.pyz` and substitute that filename for
+`mdworkbench.py` in these commands. The same environment prerequisites apply.
+
 ## What it provides
 
 - Any number of ordered trajectory segments per replica; combined `.dat` tables
@@ -29,7 +32,9 @@ filename in the run command. Omit `--quick` for the full guided setup.
   residue ranges and named regions.
 - Individual, overlaid and concatenated SVGs where appropriate; coordinated
   palettes, configurable sizing and Arial preference with a recorded fallback.
-- Offline HTML with grouped analysis dropdowns, numerical previews, per-replica
+- Probability distributions for scalar time series, with per-replica densities,
+  matching histogram bins and numerical tables.
+- Offline HTML with an analysis directory, trace/distribution/summary views, per-replica
   statistics and sampling guidance. Optional click-to-load **3Dmol.js** shows one
   reference structure, with atom/file limits and no trajectory animation.
 

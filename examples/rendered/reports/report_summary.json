@@ -31,6 +31,7 @@
   },
   "figure_style": null,
   "figure_analyses": {},
+  "figure_titles": {},
   "viewer": "index.html",
   "synthetic": true,
   "description": "SYNTHETIC demonstration; no molecular dynamics or cpptraj execution"
