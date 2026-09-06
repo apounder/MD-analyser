@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cpptraj-workbench"
+version = "1.6.0"
+description = "Reproducible replica-aware biomolecular CPPTRAJ analysis and SVG reporting"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "matplotlib>=3.7"]
+
+[project.scripts]
+mdworkbench = "mdwb.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mdwb*"]
+
+[tool.setuptools.package-data]
+mdwb = ["*.html", "vendor/*.js", "vendor/*.txt", "vendor/*.json"]

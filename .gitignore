@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+analysis_results/
+*.nc
+*.xtc
+*.trr
+*.dcd
+*.rst7
+.DS_Store
