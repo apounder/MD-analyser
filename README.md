@@ -16,8 +16,14 @@ python mdworkbench.py run analysis_config.json
 ```
 
 The wizard discovers topology/trajectory files, asks how to group replicas and
-segments, explains selections, and saves a reusable configuration. Use its saved
-filename in the run command. Omit `--quick` for the full guided setup.
+segments, explains selections, and saves a reusable configuration. At “Run CPPTRAJ
+now?”, press Enter to run (the default), or answer `n` to save it for later; the
+wizard prints the command to run that file. Starting the wizard again detects an
+existing configuration and offers to run it without repeating setup. It checks
+`analysis_config.json` first, then other analysis JSON files in the current folder
+and `--root` folder, offering a choice if several are found. Use `wizard --config
+study.json` to run a specific saved configuration or create one with a new filename.
+Omit `--quick` to choose between basic and guided setup.
 
 For clusters, copy only `mdworkbench.pyz` and substitute that filename for
 `mdworkbench.py` in these commands. The same environment prerequisites apply.

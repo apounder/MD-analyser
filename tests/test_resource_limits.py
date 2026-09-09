@@ -92,6 +92,8 @@ class ResourceLimitTests(unittest.TestCase):
                 (root/'rep.nc').write_bytes(b'placeholder')
                 target = root/'config.json'
                 def answer(prompt):
+                    if prompt.startswith('Run CPPTRAJ now?'):
+                        return 'n'
                     if prompt.startswith('Setup path:'):
                         return 'basic' if quick else 'guided'
                     return ''

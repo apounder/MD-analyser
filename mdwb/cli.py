@@ -8,6 +8,7 @@ import math
 import tempfile
 import shutil
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -438,6 +439,29 @@ def configure_clustering(config, info):
 
 
 def wizard(root, config_path, quick=None):
+    root = Path(root).expanduser().resolve()
+    target = Path(config_path).expanduser().resolve()
+    existing = [target] if target.is_file() else []
+    if not existing and str(config_path) == "analysis_config.json":
+        # Only inspect nearby configuration files, not JSON in result trees.
+        for path in sorted(set(Path.cwd().glob("*.json")) | set(root.glob("*.json")), key=natural_key):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and "topology" in data and "replicas" in data:
+                existing.append(path)
+    if existing:
+        if len(existing) > 1:
+            print("\nSaved analysis configurations:")
+            numbered(existing)
+            index = ask("Choose saved configuration", 1, int, lambda n: 1 <= n <= len(existing))
+            target = existing[index - 1]
+        else:
+            target = existing[0]
+        print(f"\nExisting configuration found: {target}")
+        print("To create another configuration, use wizard --config with a new filename.")
+        return offer_run(target)
     from .console import panel
     panel("CPPTRAJ WORKBENCH · SETUP", [("Basic path", "Detected biomolecular regions, RMSD/RMSF/Rg, optional extras"),
           ("Guided path", "Custom regions, fitting, frame selection and specialist parameters"),
@@ -448,7 +472,6 @@ def wizard(root, config_path, quick=None):
     print("\nCPPTRAJ Workbench — interactive setup")
     print("One configuration compares replicas of the SAME system with one matching atom order/topology.")
     print("Files in one replica are sequential chunks; independent replicas remain separate.")
-    root = Path(root).expanduser().resolve()
     candidates = discover(root)
     print(f"\nSearching {root}")
     print("Topology candidates:")
@@ -603,15 +626,24 @@ def finish_wizard(config, config_path, root):
     target.parent.mkdir(parents=True, exist_ok=True)
     save_config(config, target)
     print(f"\nConfiguration saved: {target}")
-    print(f'Preview: python mdworkbench.py plan "{target}" --output "{target.parent / "analysis_plan"}"')
-    print(f'Run:     python mdworkbench.py run "{target}"')
-    if yes("Run CPPTRAJ now?", False):
+    return offer_run(target)
+
+
+def offer_run(target):
+    entry = "mdworkbench.pyz" if sys.argv[0].endswith(".pyz") else "mdworkbench.py"
+    command = shlex.join(["python", entry, "run", str(target)])
+    print("Preview: " + shlex.join(["python", entry, "plan", str(target), "--output", str(target.parent / "analysis_plan")]))
+    print("Run saved configuration: " + command)
+    if yes("Run CPPTRAJ now?", True):
+        config = load_config(target)
         from .runner import run_workflow
         manifest = run_workflow(config)
         from .console import result_summary
         if "report" in manifest:
             result_summary(manifest["report"], config["output"])
+        print(f"Run status: {manifest['status']}. Results: {config['output']}")
         return 0 if manifest["status"] == "complete" else 2
+    print("Configuration kept. Run it later with:\n  " + command)
     return 0
 
 
