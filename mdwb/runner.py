@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,14 +39,39 @@ def executable(config):
 
 
 def invoke(binary, args, cwd, log_path):
-    """No shell interpolation; logs persist even on failure."""
+    """No shell; protect filenames from CPPTRAJ's argv and trajin re-parsing.
+
+    CPPTRAJ joins argv and tokenizes it again; -y is subsequently parsed as a
+    trajin expression as well. Relative, whitespace-free symlink names survive
+    both passes. The process cwd stays unchanged, preserving output locations.
+    """
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8") as log:
+    with ExitStack() as cleanup, log_path.open("w", encoding="utf-8") as log:
+        native_args = list(map(str, args))
+        aliases = None
         try:
-            result = subprocess.run([binary, *args], cwd=cwd, stdout=log, stderr=subprocess.STDOUT, text=True, check=False)
+            for i in range(1, len(native_args)):
+                value = native_args[i]
+                if args[i-1] in {"-p", "-y", "-i", "-c", "-d"} and any(c.isspace() or c in "\"'" for c in value):
+                    if aliases is None:
+                        aliases = Path(cleanup.enter_context(tempfile.TemporaryDirectory(prefix=".cpptraj-input-", dir=cwd)))
+                    source = Path(value)
+                    if not source.is_absolute():
+                        source = Path(cwd) / source
+                    source = source.resolve()
+                    suffix = re.sub(r"[^A-Za-z0-9.]", "_", "".join(source.suffixes))
+                    alias = aliases / f"input_{i}{suffix}"
+                    alias.symlink_to(source)
+                    native_args[i] = f"{aliases.name}/{alias.name}"
+                    log.write(f"# Input alias: {native_args[i]} -> {source}\n")
+                elif any(c.isspace() or c in "\"'" for c in value):
+                    # Non-file arguments such as masks need only the argv pass.
+                    native_args[i] = quote(value)
+            log.flush()
+            result = subprocess.run([binary, *native_args], cwd=cwd, stdout=log, stderr=subprocess.STDOUT, text=True, check=False)
         except OSError as exc:
-            raise RunError(f"Could not execute CPPTRAJ: {exc}") from exc
+            raise RunError(f"Could not execute CPPTRAJ or prepare input links: {exc}; see {log_path}") from exc
     text = log_path.read_text(encoding="utf-8", errors="replace")
     errors = re.findall(r"(?im)^\s*(?:Error:|Fatal:).*$", text)
     if result.returncode != 0 or errors:
@@ -158,8 +185,44 @@ def make_plan(config, output=None):
     return directory
 
 
+def read_replica_lengths(binary, config, directory):
+    """Inspect saved-frame counts before selections or trajectory preparation."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    replicas = copy.deepcopy(config["replicas"])
+    for replica in replicas:
+        lengths = []
+        for index, path in enumerate(replica["trajectories"], 1):
+            log = invoke(binary, ["-p", config["topology"], "-y", path, "-tl"], directory, directory / f"length_{replica['name']}_{index:04}.log")
+            matches = re.findall(r"(?m)^\s*Frames:\s*(\d+)\s*$", log)
+            if not matches or int(matches[-1]) < 1:
+                raise RunError(f"Could not determine frame count for {path}. This workflow requires a CPPTRAJ reader that reports trajectory length.")
+            lengths.append(int(matches[-1]))
+        replica["lengths"] = lengths
+    return replicas
+
+
+def length_warning(replicas):
+    totals = {r["name"]: sum(r["lengths"]) for r in replicas}
+    if len(set(totals.values())) > 1:
+        return "TRAJECTORY LENGTH MISMATCH: joined replicas have different saved-frame counts: " + ", ".join(f"{name}={count}" for name, count in totals.items())
+    return None
+
+
+def show_replica_lengths(replicas, dt_ps=None):
+    warning = length_warning(replicas)
+    print("\n" + (warning or "Trajectory lengths checked: joined replicas have equal saved-frame counts."))
+    for replica in replicas:
+        count = sum(replica["lengths"])
+        time = f"; time span 0–{(count-1)*dt_ps/1000:g} ns" if dt_ps else ""
+        print(f"  {replica['name']}: {count} frames; segments {replica['lengths']}{time}")
+    return warning
+
+
 def preflight(binary, config, selections, batches, pooled, directory):
     directory.mkdir(parents=True, exist_ok=True)
+    replicas = read_replica_lengths(binary, config, directory)
+    show_replica_lengths(replicas, config["frames"]["dt_ps"])
     masks = {config["fit_mask"], *[s["mask"] for s in config["sections"]]}
     if config.get("structure_view", {}).get("enabled", True) and selections.get("heavy"):
         masks.add(selections["heavy"])
@@ -171,6 +234,8 @@ def preflight(binary, config, selections, batches, pooled, directory):
         masks.update([pair["mask1"], pair["mask2"]])
     if config["imaging"].get("anchor"):
         masks.add(config["imaging"]["anchor"])
+    for ring in config.get("stacking", {}).get("rings", []):
+        masks.add("@" + ",".join(map(str, ring["atoms"])))
     for batch in batches + pooled:
         if batch.get("coordinate_mask"):
             masks.add(batch["coordinate_mask"])
@@ -188,6 +253,10 @@ def preflight(binary, config, selections, batches, pooled, directory):
         if not atoms:
             raise RunError(f"Mask selects zero atoms: {mask}")
         selected[mask] = atoms
+    for ring in config.get("stacking", {}).get("rings", []):
+        mask = "@" + ",".join(map(str, ring["atoms"]))
+        if set(selected[mask]) != set(ring["atoms"]):
+            raise RunError(f"Pi-system atom selection changed for {ring['name']}")
     if len(selected[config["fit_mask"]]) < 3:
         raise RunError("Global RMS fitting needs at least three atoms; choose a noncollinear fit mask.")
     for monitor in config.get("monitors", []):
@@ -211,17 +280,8 @@ def preflight(binary, config, selections, batches, pooled, directory):
             span = max(residues) - min(residues) + 1
             if span > config["advanced"]["max_matrix_atoms"]:
                 raise RunError(f"{batch['name']}: contact-map residue span {span} exceeds max_matrix_atoms={config['advanced']['max_matrix_atoms']}. Narrow interface masks or disable contacts; CPPTRAJ allocates across the full residue span.")
-    replicas = copy.deepcopy(config["replicas"])
     for replica in replicas:
-        lengths = []
-        for index, path in enumerate(replica["trajectories"], 1):
-            log = invoke(binary, ["-p", config["topology"], "-y", path, "-tl"], directory, directory / f"length_{replica['name']}_{index:04}.log")
-            matches = re.findall(r"(?m)^\s*Frames:\s*(\d+)\s*$", log)
-            if not matches or int(matches[-1]) < 1:
-                raise RunError(f"Could not determine frame count for {path}. This workflow requires a CPPTRAJ reader that reports trajectory length.")
-            lengths.append(int(matches[-1]))
-        replica["lengths"] = lengths
-        replica["windows"] = select_windows(lengths, config["frames"])
+        replica["windows"] = select_windows(replica["lengths"], config["frames"])
         replica["frame_count"] = sum(w["count"] for w in replica["windows"] if w)
     return selected, replicas
 
@@ -231,6 +291,11 @@ def resource_check(config, batch, atoms, frame_count):
     if not batch.get("coordinate_mask"):
         return
     limits = config["advanced"]
+    if batch.get("resource_class") == "stacking":
+        estimate = 8 * frame_count * (9 * batch["stacking_ring_count"] + 4 * batch["stacking_pair_count"])
+        if estimate / 1024**3 > limits["max_memory_gb"]:
+            raise RunError("Stacking vector/scalar datasets exceed max_memory_gb; increase analysis stride or shorten the time range")
+        return
     if "pca" in batch["name"] and (frame_count <= limits["pca_modes"] or 3 * atoms < limits["pca_modes"]):
         raise RunError("PCA requires more frames than requested modes, and at least as many Cartesian coordinates as modes.")
     if "cluster" in batch["name"] and math.ceil(frame_count / limits["cluster_sieve"]) < limits["cluster_count"]:
@@ -239,7 +304,7 @@ def resource_check(config, batch, atoms, frame_count):
         raise RunError(f"{batch['name']}: {atoms} atoms exceeds max_matrix_atoms={limits['max_matrix_atoms']}. Narrow matrix_mask.")
     if batch.get("pooled") or batch.get("resource_class") == "pairwise":
         if frame_count > limits["max_frames"]:
-            raise RunError(f"{batch['name']}: {frame_count} frames exceeds max_frames={limits['max_frames']}. Increase frames.stride or explicitly raise the limit.")
+            raise RunError(f"{batch['name']}: {frame_count} frames exceeds max_frames={limits['max_frames']}. Raise advanced.max_frames to retain all selected frames; this does not change sampling or bypass the memory guard.")
     # Includes a coordinate buffer and several dense double-precision matrices.
     if batch.get("resource_class") == "atom_matrix":
         # DCCM accumulates moments while streaming; it does not retain frames.
@@ -251,7 +316,7 @@ def resource_check(config, batch, atoms, frame_count):
         estimate += 16 * n * n
     gb = estimate / 1024 ** 3
     if gb > limits["max_memory_gb"]:
-        raise RunError(f"{batch['name']}: conservative memory estimate {gb:.2f} GiB exceeds max_memory_gb={limits['max_memory_gb']}. Narrow masks, increase stride/sieve, or raise the explicit limit.")
+        raise RunError(f"{batch['name']}: conservative memory estimate {gb:.2f} GiB exceeds max_memory_gb={limits['max_memory_gb']}. Narrow the coordinate mask or raise advanced.max_memory_gb within available RAM. For clustering, increasing advanced.cluster_sieve reduces fitting cost without thinning other analyses.")
 
 
 def _artifact_paths(batch, directory, selected):
@@ -358,8 +423,13 @@ def run_workflow(config, *, make_plots=True, progress=print):
         manifest["inputs"] = [_fingerprint(config["topology"], True)] + [_fingerprint(p) for r in config["replicas"] for p in r["trajectories"]]
         if config["reference"]:
             manifest["inputs"].append(_fingerprint(config["reference"], True))
-        progress("Validating selections and counting trajectory frames...")
+        if config["convergence"]["reference_path"]:
+            manifest["inputs"].append(_fingerprint(config["convergence"]["reference_path"], True))
+        progress("Counting trajectory frames before validating selections...")
         selected, replicas = preflight(binary, config, selections, batches, pooled, output / "preflight")
+        warning = length_warning(replicas)
+        if warning:
+            manifest["warnings"].append(warning + ". Saved frames.start/stop/stride selections apply; edit the config to trim or rerun the wizard.")
         save_config(selected, output / "selected_atoms.json")
         for replica in replicas:
             replica.update(status="pending", artifacts=[], batches=[])

@@ -2,6 +2,8 @@
 import re
 
 ANALYSIS_LABELS = {
+    "stacking": "Pi-stacking occupancy", "stacking_any": "Pi-stacking: any partner",
+    "stacking_distance": "Pi-system centroid distance", "stacking_angle": "Pi-system plane angle",
     "rg": "Radius of gyration", "rog": "Radius of gyration",
     "radius of gyration": "Radius of gyration",
     "rmsd": "Root-mean-square deviation (RMSD)",

@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 from .topology import inspect_topology
+from .selections import normalize_mask, normalize_config_masks
 
 TOPOLOGY_SUFFIXES = {".prmtop", ".parm7", ".top", ".psf", ".pdb", ".mol2", ".gro"}
 TRAJECTORY_SUFFIXES = {".nc", ".netcdf", ".mdcrd", ".crd", ".dcd", ".xtc", ".trr", ".binpos", ".h5", ".lammpstrj"}
@@ -19,11 +20,14 @@ DEFAULTS = {
     "reference": None, "fit_mask": "representative",
     "sections": [], "interactions": [], "monitors": [],
     "solvation": [],
+    "stacking": {"rings": [], "targets": [], "distance_cutoff": 5.0, "angle_cutoff": 30.0,
+                 "center": "geometry", "exclude_same_residue": True, "max_pairs": 2000},
     "analysis": {"level": "standard", "enabled": None, "additional": []},
     "progress": {"enabled": True},
     "nucleic": {"resrange": None, "resmap": {}},
     "advanced": {"matrix_mask": "representative", "pca_modes": 3, "cluster_count": 5,
-                 "cluster_sieve": 10, "pairwise_rmsd": False, "max_frames": 20000,
+                 "cluster_sieve": 10, "cluster_metric": "rms", "cluster_features": [],
+                 "cluster_algorithm": "kmeans", "pairwise_rmsd": False, "max_frames": 20000,
                  "max_matrix_atoms": 2000, "max_memory_gb": 4.0},
     "plots": {"dpi": 600, "alpha": 0.85, "enabled": True, "font": "Arial",
               "font_size": 11, "width_mm": 180, "palette": "lagoon", "svg_text": "editable"},
@@ -31,6 +35,9 @@ DEFAULTS = {
     "reports": {"max_matrix_cells": 1000000, "preview_series": 500, "preview_points": 600},
     "study": {"title": "MD analysis", "description": ""},
     "structure_view": {"enabled": True, "max_atoms": 12000, "max_bytes": 1500000},
+    "convergence": {"enabled": True, "checkpoints": 20, "window_frames": 50,
+                    "reference_mode": "pooled", "tail_ns": 10.0, "reference_path": None,
+                    "references": {}, "metrics": []},
     "diagnostics": {"enabled": True, "max_series": 100, "max_samples": 1000000,
                     "max_lag": 10000, "histogram_bins": 32, "max_pairs": 10000},
 }
@@ -161,6 +168,8 @@ def normalize_config(data, base=None, check_files=True):
     if config["analysis"]["enabled"] is not None and config["analysis"]["additional"]:
         raise ValueError("Use either analysis.enabled (exact list) or a preset with analysis.additional.")
     enabled = enabled_analyses(config)
+    from .stacking import validate_stacking
+    validate_stacking(config["stacking"], "stacking" in enabled)
     if not isinstance(config["solvation"], list):
         raise ValueError("solvation must be a list of named rdf or watershell specifications.")
     solvation_names = set()
@@ -237,6 +246,27 @@ def normalize_config(data, base=None, check_files=True):
         raise ValueError("frames.stop must be -1 or >= frames.start.")
     if frames["dt_ps"] is not None and (type(frames["dt_ps"]) not in (int, float) or not math.isfinite(frames["dt_ps"]) or frames["dt_ps"] <= 0):
         raise ValueError("frames.dt_ps must be positive or null (saved-frame interval, not the integration timestep).")
+    from .convergence_config import validate as validate_convergence
+    validate_convergence(config["convergence"], base, frames["dt_ps"], check_files)
+    advanced = config["advanced"]
+    if advanced["cluster_metric"] not in {"rms", "dme", "srmsd", "features"}:
+        raise ValueError("cluster_metric must be rms, dme, srmsd, or features")
+    if advanced["cluster_algorithm"] not in {"kmeans", "hieragglo"}:
+        raise ValueError("cluster_algorithm must be kmeans or hieragglo")
+    if not isinstance(advanced["cluster_features"], list):
+        raise ValueError("cluster_features must list monitor/weight objects")
+    seen_features = set()
+    for feature in advanced["cluster_features"]:
+        if not isinstance(feature, dict) or set(feature) != {"monitor", "weight"}:
+            raise ValueError("Each cluster feature requires monitor and weight")
+        name, weight = feature["monitor"], feature["weight"]
+        if not isinstance(name, str) or name not in {m["name"] for m in config["monitors"]} or name in seen_features:
+            raise ValueError("Cluster features must name distinct configured monitors")
+        seen_features.add(name)
+        if type(weight) not in (int, float) or not math.isfinite(weight) or weight <= 0:
+            raise ValueError("Cluster feature weights must be finite and positive")
+    if advanced["cluster_metric"] == "features" and not advanced["cluster_features"]:
+        raise ValueError("Feature clustering requires at least one geometry monitor")
     for key in ("pca_modes", "cluster_count", "cluster_sieve", "max_frames", "max_matrix_atoms"):
         if type(config["advanced"][key]) is not int or config["advanced"][key] < 1:
             raise ValueError(f"advanced.{key} must be a positive integer.")
@@ -294,19 +324,30 @@ def normalize_config(data, base=None, check_files=True):
         for path in [config["topology"], *paths, *([config["reference"]] if config["reference"] else [])]:
             if not Path(path).is_file():
                 raise ValueError(f"Input file not found: {path}")
+    if check_files and "stacking" in enabled:
+        from .rings import read_bond_graph
+        atoms, _, _ = read_bond_graph(config["topology"])
+        atom_residues = {a["index"]: a["residue"] for a in atoms}
+        for ring in config["stacking"]["rings"]:
+            if any(atom_residues.get(a) != ring["residue"] for a in ring["atoms"]):
+                raise ValueError(f"Pi system {ring['name']}: atom indices do not belong to topology residue {ring['residue']}")
     output = Path(config["output"])
+    if config["convergence"]["reference_path"] and Path(config["convergence"]["reference_path"]).is_relative_to(output):
+        raise ValueError("Output directory must not contain convergence reference input data")
     for p in [config["topology"], *paths, *([config["reference"]] if config["reference"] else [])]:
         if Path(p).is_relative_to(output):
             raise ValueError("Output directory must not contain input data. Choose a separate results directory.")
+    normalize_config_masks(config)
     return config
 
 
 def resolve_selections(config):
+    normalize_config_masks(config)
     info = inspect_topology(config["topology"])
     selections = dict(info["selections"])
     builtin = set(selections)
     def resolve(mask):
-        return selections.get(mask, mask)
+        return normalize_mask(selections.get(mask, mask))
     for section in config["sections"]:
         if section["name"] in builtin and section["mask"] != section["name"] and resolve(section["mask"]) != selections[section["name"]]:
             raise ValueError(f"Section {section['name']} would overwrite a built-in selection; choose another name.")

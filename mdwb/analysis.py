@@ -16,6 +16,7 @@ from typing import Any
 
 
 SOURCES = {
+    "stacking": "https://amberhub.chpc.utah.edu/vector/",
     "rdf": "https://amberhub.chpc.utah.edu/radial-rdf/",
     "watershell": "https://amberhub.chpc.utah.edu/watershell/",
     "rmsd": "https://amberhub.chpc.utah.edu/rmsd/",
@@ -39,7 +40,7 @@ SOURCES = {
 BASIC = frozenset({"rmsd", "rg", "rmsf"})
 STANDARD = BASIC | {"hbond", "dssp", "distance", "contacts"}
 ADVANCED = STANDARD | {"sasa", "nastruct", "torsions", "dccm", "pca", "cluster"}
-KNOWN_ANALYSES = ADVANCED | {"pairwise_rmsd", "angle", "dihedral", "rdf", "watershell"}
+KNOWN_ANALYSES = ADVANCED | {"stacking", "pairwise_rmsd", "angle", "dihedral", "rdf", "watershell"}
 LEVELS = {"basic": BASIC, "standard": STANDARD, "advanced": ADVANCED}
 
 
@@ -64,7 +65,9 @@ def quote_mask(mask: str) -> str:
 
 def resolve_mask(value: str, selections: dict[str, str]) -> str:
     """Resolve a named selection, or accept an explicit CPPTRAJ expression."""
-    mask = selections.get(value, value)
+    from .selections import normalize_mask
+    value = normalize_mask(value)
+    mask = normalize_mask(selections.get(value, value))
     quote_mask(mask)
     if not any(char in mask for char in ":@!*^/"):
         raise ValueError(f"Unknown selection {value!r}; use a named selection or CPPTRAJ mask.")
@@ -321,6 +324,9 @@ def build_batches(config: dict, selections: dict[str, str]) -> list[dict]:
         batches.append(_batch("dccm", "Dynamic cross-correlation of the selected representative atoms.",
                               [f"matrix correl {quote_mask(mask)} name A_DCCM out {art['path']}"], [art],
                               coordinate_mask=mask, resource_class="atom_matrix"))
+    if "stacking" in enabled:
+        from .stacking import build_stacking_batches
+        batches.extend(build_stacking_batches(config))
     return batches
 
 
@@ -361,12 +367,27 @@ def build_pooled_batches(config: dict, selections: dict[str, str]) -> list[dict]
         sieve = _positive(options.get("cluster_sieve", 10), "cluster_sieve", integer=True)
         assignment = _artifact("cluster", "representative", "timeseries", "cluster", pooled=True, categorical=True)
         summary = _artifact("cluster_population", "representative", "table", "mixed", pooled=True, format="cluster_summary")
-        command = (f"runanalysis cluster A_CLUSTER crdset A_POOLED kmeans clusters {count} randompoint kseed 2026 "
-                   f"maxit 200 rms @* sieve {sieve} random sieveseed 2026 "
+        metric = options.get("cluster_metric", "rms")
+        algorithm = options.get("cluster_algorithm", "kmeans")
+        algorithm_args = (f"kmeans clusters {count} randompoint kseed 2026 maxit 200"
+                          if algorithm == "kmeans" else f"hieragglo clusters {count} averagelinkage")
+        cluster_commands = commands[:]
+        metric_args = f"{metric} @*"
+        if metric == "features":
+            # Measure on original topology before stripping: masks retain atom IDs.
+            geometry = next(b for b in build_batches(config, selections) if b["name"] == "geometry_monitors")
+            names = [f["monitor"] for f in options["cluster_features"]]
+            feature_commands = [c for c in geometry["commands"] if c.split()[1] in {f"A_MON_{n}" for n in names}]
+            cluster_commands = feature_commands + cluster_commands
+            datasets = ','.join(f"A_MON_{n}" for n in names)
+            weights = ','.join(str(f["weight"]) for f in options["cluster_features"])
+            metric_args = f"data {datasets} euclid wgt {weights}"
+        command = (f"runanalysis cluster A_CLUSTER crdset A_POOLED {algorithm_args} "
+                   f"{metric_args} sieve {sieve} random sieveseed 2026 "
                    f"out {assignment['path']} summary {summary['path']} "
                    "info cluster_info.dat singlerepout cluster_representatives.pdb singlerepfmt pdb")
-        batches.append(_batch("cluster_pooled", "Pooled k-means RMSD clusters with shared labels; representatives contain selected atoms.",
-                              commands[:], [assignment, summary], [command],
+        batches.append(_batch("cluster_pooled", f"Pooled {algorithm} clustering using {metric}; shared labels across replicas.",
+                              cluster_commands, [assignment, summary], [command],
                               coordinate_mask=mask, resource_class="pooled_cluster", pooled=True))
     if "pairwise_rmsd" in enabled:
         art = _artifact("pairwise_rmsd", "representative", "matrix", "angstrom", pooled=True,

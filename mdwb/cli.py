@@ -4,6 +4,9 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
+import tempfile
+import shutil
 import re
 import sys
 from pathlib import Path
@@ -12,6 +15,7 @@ from . import __version__
 from .analysis import KNOWN_ANALYSES, LEVELS, enabled_analyses
 from .config import DEFAULTS, discover, load_config, natural_key, normalize_config, safe_name, save_config
 from .topology import inspect_topology
+from .selections import normalize_mask
 
 
 def ask(prompt, default=None, convert=str, valid=None, *, help_text=None):
@@ -68,9 +72,8 @@ def _group_files(paths, mode):
             for i, (_, chunks) in enumerate(groups.items(), 1)]
 
 
-def prompt_mask(prompt):
-    value = ask(prompt)
-    return ":" + value if re.fullmatch(r"\d[\d,\-]*", value) else value
+def prompt_mask(prompt, default=None):
+    return ask(prompt, default, normalize_mask)
 
 
 def _quick_geometry(raw, count):
@@ -81,7 +84,7 @@ def _quick_geometry(raw, count):
     result = []
     for value in values:
         match = re.fullmatch(r"([1-9]\d*):([A-Za-z0-9'+_-]+)", value)
-        value = f":{match[1]}@{match[2]}" if match else (":" + value if re.fullmatch(r"\d[\d,\-]*", value) else value)
+        value = f":{match[1]}@{match[2]}" if match else normalize_mask(value)
         result.append(safe_text(value, "geometry selection"))
     return result
 
@@ -160,6 +163,7 @@ def additional_analyses(config, info):
         ("rmsf", "Residue RMSF"),
         ("rdf", "Radial distribution: pair structure versus distance (periodic systems)"),
         ("watershell", "Solvent shells: local solvent counts around a selected region"),
+        ("stacking", "Pi-stacking: discover and name rings from residue numbers"),
     ]
     if not yes("Would you like any additional analyses or custom monitors?", False):
         return
@@ -171,6 +175,8 @@ def additional_analyses(config, info):
                  lambda s: [] if s == "0" else _indices(s, len(menu)))
     selected = [menu[i][0] for i in chosen]
     config["analysis"]["additional"] = sorted(set(selected) - set(preset))
+    if "stacking" in selected:
+        configure_stacking(config)
     for kind in ("distance", "angle", "dihedral"):
         if kind in selected:
             configure_monitors(config, kind, info)
@@ -211,6 +217,224 @@ def additional_analyses(config, info):
                                        "mask1": prompt_mask("First interface mask"),
                                        "mask2": prompt_mask("Second interface mask"),
                                        "contact_cutoff": ask("Contact cutoff in angstroms", 4.5, float, lambda x: x > 0)})
+
+
+def configure_stacking(config):
+    from .rings import discover_pi_systems, read_bond_graph
+    from .stacking import stacking_pairs
+    atoms, _, _ = read_bond_graph(config["topology"])
+    available = {a["residue"] for a in atoms}
+    print("\nPi-system discovery uses topology bonds, not atom-name templates. Residues use topology numbering.")
+    def residue_input(text):
+        values = {i+1 for i in _indices(text.lstrip(':'), max(available))}
+        if not values <= available:
+            raise ValueError("Choose residues present in the topology")
+        return values
+    targets = ask("Target residue numbers (e.g. 24,30-32)", None, residue_input)
+    candidates, notes = discover_pi_systems(config["topology"])
+    target_candidates = [r for r in candidates if r['residue'] in targets]
+    for note in notes:
+        if any(note.startswith(f"Residue {r} ") for r in targets):
+            print("  " + note)
+    if not target_candidates:
+        raise ValueError("No candidate pi systems in the selected residues. Check bonded topology/atom types; saturated rings are excluded.")
+    def confirm(candidates, title):
+        print("\n" + title)
+        for i, ring in enumerate(candidates, 1):
+            print(f"  {i}. Residue {ring['residue']} {ring['residue_name']}: {ring['kind']}; "
+                  f"atoms {','.join(ring['atom_names'])}; topology indices {ring['atoms']}; {ring['evidence']}")
+        print("Connectivity alone does not prove aromaticity. Confirm the chemistry of uncertain candidates; guanidinium groups are not rings.")
+        # Prefer whole fused systems; users may select constituent rings instead.
+        default = ','.join(str(i+1) for i,r in enumerate(candidates)
+                           if not any(set(r['atoms']) < set(other['atoms']) for other in candidates))
+        indices = ask("Confirm pi systems of interest (numbers/all; 0 = none)", default,
+                      lambda value: [] if value == '0' else _indices(value,len(candidates)))
+        return [dict(candidates[i]) for i in indices]
+    selected_targets = confirm(target_candidates, "Candidate target rings / pi systems")
+    if not selected_targets:
+        raise ValueError("No target pi systems confirmed")
+    named = set()
+    for ring in selected_targets:
+        ring['name'] = ask(f"Name the pi system in residue {ring['residue']}", ring['name'], safe_name,
+                           lambda name: name.casefold() not in named)
+        named.add(ring['name'].casefold())
+    config["stacking"]["exclude_same_residue"] = not yes("Include contacts between distinct rings in the same residue?", False)
+    partner_residues = ask("Partner residue scope: all, or residue numbers/ranges", "all",
+                           lambda value: available if value == 'all' else residue_input(value))
+    target_atom_sets = {tuple(r['atoms']) for r in selected_targets}
+    partners = [r for r in candidates if r['residue'] in partner_residues and tuple(r['atoms']) not in target_atom_sets
+                and (not config['stacking']['exclude_same_residue'] or r['residue'] not in targets)]
+    selected_partners = confirm(partners, "Candidate partner pi systems (tested over every selected frame)") if partners else []
+    for ring in selected_partners:
+        # Automatic names are shown above; custom naming is optional for many partners.
+        while ring['name'].casefold() in named:
+            ring['name'] += '_partner'
+        named.add(ring['name'].casefold())
+    if selected_partners and yes("Customize partner ring names?", False):
+        for ring in selected_partners:
+            named.remove(ring['name'].casefold())
+            ring['name'] = ask(f"Partner name for residue {ring['residue']}", ring['name'], safe_name,
+                               lambda name: name.casefold() not in named)
+            named.add(ring['name'].casefold())
+    options = config['stacking']
+    options['rings'] = selected_targets + selected_partners
+    options['targets'] = [r['name'] for r in selected_targets]
+    options['distance_cutoff'] = ask("Stacking centroid-distance cutoff (angstrom)", 5.0, float,
+                                     lambda x: math.isfinite(x) and 0 < x <= 100)
+    options['angle_cutoff'] = ask("Parallel/antiparallel plane-angle tolerance (degrees)", 30.0, float,
+                                  lambda x: math.isfinite(x) and 0 < x <= 90)
+    options['center'] = ask("Ring center: geometry/mass (donor script used mass)", "geometry", str.lower,
+                            lambda x: x in {'geometry','mass'})
+    pairs = stacking_pairs(options)
+    if not pairs:
+        raise ValueError("No nonoverlapping inter-residue pi-system pairs were confirmed")
+    print(f"Stacking: {len(pairs)} unique pairs; per-target and per-residue any-partner occupancies, plus equal-replica mean and SD.")
+
+
+def configure_frame_range(config):
+    """Length inspection and trimming precede all analysis-selection questions."""
+    from .runner import executable, read_replica_lengths, show_replica_lengths, length_warning, RunError
+    replicas = None
+    try:
+        binary = executable(config)
+    except RunError:
+        print("Trajectory lengths are unverified: CPPTRAJ is unavailable. The run will check counts before analysis.")
+    else:
+        print("Loading trajectory length metadata with CPPTRAJ...")
+        directory = tempfile.mkdtemp(prefix="mdwb-lengths-")
+        try:
+            replicas = read_replica_lengths(binary, config, directory)
+        except BaseException:
+            print(f"Trajectory length-check logs retained in {directory}")
+            raise
+        else:
+            shutil.rmtree(directory)
+        show_replica_lengths(replicas)
+    print("Choose the part to analyze now; settings apply across joined segments in every replica.")
+    dt = ask("Saved-frame interval in ps (0 = unknown; use frame axes)", 0.0, float, lambda x: math.isfinite(x) and x >= 0)
+    config["frames"]["dt_ps"] = dt or None
+    if replicas and dt:
+        show_replica_lengths(replicas, dt)
+    shortest = min(sum(r["lengths"]) for r in replicas) if replicas else None
+    endpoint = -1
+    if replicas and length_warning(replicas) and yes("Use the shortest replica's endpoint for all replicas?", False):
+        endpoint = shortest
+    unit = ask("Select analysis range in frames/ns", "frames", str.lower, lambda x: x in {"frames", "ns"}) if dt else "frames"
+    if unit == "ns":
+        interval = dt / 1000
+        print("Times are relative to saved frame 1 = 0 ns. Start/end bounds are inclusive; only saved frames inside them are kept.")
+        start_ns = ask("Start time in ns (discard the beginning)", 0.0, float,
+                       lambda x: math.isfinite(x) and x >= 0 and (shortest is None or x <= (shortest-1)*interval))
+        start = math.ceil(start_ns/interval - 1e-10) + 1
+        end_ns = ask("End time in ns (-1 = each replica's end)", -1 if endpoint == -1 else (endpoint-1)*interval, float,
+                     lambda x: math.isfinite(x) and (x == -1 or (x >= start_ns and math.floor(x/interval + 1e-10)+1 >= start and (shortest is None or math.floor(x/interval + 1e-10)+1 <= shortest))))
+        stop = -1 if end_ns == -1 else math.floor(end_ns/interval + 1e-10) + 1
+    else:
+        start = ask("First frame to analyze (discard equilibration before this)", 1, int,
+                    lambda x: x > 0 and (shortest is None or x <= shortest))
+        stop = ask("Last frame (-1 = each replica's end)", endpoint, int, lambda x: x == -1 or (x >= start and (shortest is None or x <= shortest)))
+    stride = ask("Global analysis stride (1 = analyze every saved frame)", 1, int, lambda x: x > 0,
+                 help_text="Applies to every analysis. Keep 1 for full sampling; clustering has its own separate sieve setting.")
+    config["frames"].update(start=start, stop=stop, stride=stride)
+    if replicas:
+        from .runner import select_windows
+        for replica in replicas:
+            count = sum(w["count"] for w in select_windows(replica["lengths"], config["frames"]) if w)
+            print(f"  Analyze {replica['name']}: {count} selected frames")
+    return replicas
+
+
+def configure_resource_limits(config, replicas=None):
+    enabled = enabled_analyses(config)
+    if not enabled & {"dccm", "pca", "cluster", "pairwise_rmsd"}:
+        return
+    options = config["advanced"]
+    print("\nAdvanced analysis resource limits (guards, not memory allocations).")
+    if enabled & {"pca", "cluster", "pairwise_rmsd"}:
+        from .runner import select_windows
+
+        def pooled_count():
+            frames = config["frames"]
+            return sum(w["count"] for r in replicas
+                       for w in select_windows(r["lengths"], frames) if w)
+
+        total = pooled_count() if replicas else None
+        print("The frame limit counts selected frames across ALL replicas, after trimming and stride; cluster sieve does not reduce this count.")
+        if total is not None:
+            print(f"Pooled selection: {total:,} frames across {len(replicas)} replicas; current limit {options['max_frames']:,}.")
+            if total > options["max_frames"]:
+                print("The suggested cap below covers all selected frames. Analysis sampling stays unchanged.")
+        else:
+            print("Pooled frame count is unverified; the run will check it against this limit.")
+        options["max_frames"] = ask("Maximum pooled frames", max(options["max_frames"], total or 1), int,
+            lambda x: x > 0 and (total is None or x >= total),
+            help_text="Must cover the selected total when known. Raising this cap still leaves the memory guard in force.")
+    if "cluster" in enabled:
+        print(f"Clustering alone uses sieve {options['cluster_sieve']}: fit a random subset, then assign remaining frames. Other analyses keep their selected frames.")
+    options["max_matrix_atoms"] = ask("Maximum selected atoms for advanced analyses", options["max_matrix_atoms"], int,
+        lambda x: x > 0, help_text="The run checks the advanced coordinate mask against this atom limit.")
+    options["max_memory_gb"] = ask("Maximum estimated memory in GiB", options["max_memory_gb"], float,
+        lambda x: math.isfinite(x) and 0 < x < 100000,
+        help_text="Choose a budget within the RAM available to your job. The run checks a conservative estimate; this does not allocate RAM.")
+
+
+def configure_convergence(config):
+    options = config["convergence"]
+    print("\nConvergence over time: cumulative/window means, distributions, ESS and replica agreement.")
+    options["enabled"] = yes("Analyze convergence within and between replicas?", True)
+    if not options["enabled"]:
+        return
+    if yes("Set a gold-standard coordinate structure for RMSD?", False):
+        config["reference"] = str(Path(ask("Reference structure path")).expanduser().resolve())
+    print("Pooled = equal-replica mean and total fluctuation SD. Tail = each replica's last X ns.")
+    print("Custom/file targets use exact analysis/section/series IDs and units from reports/all_replicas.dat.")
+    options["reference_mode"] = ask("Statistical reference: pooled/tail/custom/file", "pooled", str.lower,
+                                    lambda x: x in {"pooled", "tail", "custom", "file"})
+    if options["reference_mode"] == "tail":
+        if not config["frames"]["dt_ps"]:
+            config["frames"]["dt_ps"] = ask("Saved-frame interval in ps (required for ns)", None, float, lambda x: x > 0)
+        options["tail_ns"] = ask("Last X ns per replica for reference average and SD", 10.0, float, lambda x: x > 0)
+    elif options["reference_mode"] == "file":
+        options["reference_path"] = str(Path(ask("Reference statistics JSON path")).expanduser().resolve())
+    elif options["reference_mode"] == "custom":
+        while True:
+            key = ask("Metric ID: analysis/section/series", None, str, lambda x: len(x.rsplit('/', 2)) == 3 and all(x.split('/')))
+            options["references"][key] = {"mean": ask("Reference mean", None, float),
+                                           "sd": ask("Reference standard deviation", None, float, lambda x: x >= 0),
+                                           "unit": ask("Exact metric unit (e.g. angstrom)")}
+            if not yes("Add another reference metric?", False):
+                break
+    metrics = ask("Convergence metrics: all, or comma-separated analysis names / exact metric IDs", "all")
+    options["metrics"] = [] if metrics == "all" else [m.strip() for m in metrics.split(',') if m.strip()]
+    options["window_frames"] = ask("Trailing window in analyzed frames", 50, int, lambda x: 2 <= x <= 10000)
+    options["checkpoints"] = ask("Number of convergence checkpoints", 20, int, lambda x: 2 <= x <= 10000)
+
+
+def configure_clustering(config, info):
+    if "cluster" not in enabled_analyses(config):
+        return
+    options = config["advanced"]
+    print("\nShared clustering: RMSD, distance-RMSD (DME), symmetry RMSD, or geometry features.")
+    print("Geometry features can describe bonds, metal coordination, donor/acceptor distances, angles and torsions for QM/MM.")
+    options["cluster_metric"] = ask("Cluster metric: rms/dme/srmsd/features", "rms", str.lower,
+                                     lambda x: x in {"rms", "dme", "srmsd", "features"})
+    if options["cluster_metric"] == "features":
+        while yes("Add a bond/distance, angle or dihedral feature monitor?", not bool(config["monitors"])):
+            kind = ask("Geometry: bond/distance/angle/dihedral", "distance", str.lower,
+                       lambda x: x in {"bond", "distance", "angle", "dihedral"})
+            kind = "distance" if kind == "bond" else kind
+            configure_monitors(config, kind, info)
+            config["analysis"]["additional"] = sorted(set(config["analysis"]["additional"]) | {kind})
+        names = [m["name"] for m in config["monitors"]]
+        numbered(names)
+        chosen = ask("Choose feature monitors", "all", lambda x: _indices(x, len(names)))
+        print("Choose weights explicitly: raw angstrom and degree scales differ. These are CPPTRAJ metric weights.")
+        options["cluster_features"] = [{"monitor": names[i], "weight": ask(f"Weight for {names[i]}", 1.0, float, lambda x: x > 0)} for i in chosen]
+    options["matrix_mask"] = prompt_mask("Cluster representative/coordinate mask (e.g. active-site residues)", options["matrix_mask"])
+    options["cluster_algorithm"] = ask("Cluster algorithm: kmeans/hieragglo", "kmeans", str.lower,
+                                        lambda x: x in {"kmeans", "hieragglo"})
+    options["cluster_count"] = ask("Cluster count (exploratory; tune for your system)", 5, int, lambda x: x > 0)
+    options["cluster_sieve"] = ask("Clustering sieve (fit a random 1/N subset, assign remaining frames)", 10, int, lambda x: x > 0)
 
 
 def wizard(root, config_path, quick=None):
@@ -282,6 +506,7 @@ def wizard(root, config_path, quick=None):
     config = copy.deepcopy(DEFAULTS)
     config["study"]["title"] = ask("Study title for reports", root.name or "MD analysis")
     config.update(topology=str(topology), replicas=replicas)
+    length_replicas = configure_frame_range(config)
     if quick:
         names = [name for name in ("complex", "backbone", "nucleic_backbone") if name in info["selections"]]
         if not names or "representative" not in info["selections"]:
@@ -289,12 +514,12 @@ def wizard(root, config_path, quick=None):
         config["sections"] = [{"name": name, "mask": name} for name in names]
         config["analysis"]["level"] = "basic"
         config["imaging"]["mode"] = "auto" if info["periodic"] is not None else ask("Imaging: on/off", "off", str.lower, lambda s: s in {"on", "off"}, help_text="Use on only when the trajectory contains a valid periodic box.")
-        config["frames"]["start"] = ask("First frame to analyze (discard equilibration before this)", 1, int, lambda n: n > 0)
-        dt = ask("Saved-frame interval in ps (0 = unknown; use frame axes)", 0.0, float, lambda n: n >= 0)
-        config["frames"]["dt_ps"] = dt or None
         panel("BASIC ANALYSIS PLAN", [("Sections", ", ".join(names)), ("Analyses", "RMSD, RMSF, radius of gyration"),
               ("Alignment", "Detected representative atoms; first selected frame of replica 1"), ("Imaging", config["imaging"]["mode"])])
         additional_analyses(config, info)
+        configure_convergence(config)
+        configure_clustering(config, info)
+        configure_resource_limits(config, length_replicas)
         return finish_wizard(config, config_path, root)
     print("\nAvailable selections use CPPTRAJ topology residue numbers (starting at 1):")
     for name, mask in info["selections"].items():
@@ -308,9 +533,7 @@ def wizard(root, config_path, quick=None):
         config["sections"] = []
     while yes("Add a custom section?", not bool(config["sections"])):
         name = ask("Section name", None, safe_name)
-        mask = ask("Named selection or CPPTRAJ mask")
-        if re.fullmatch(r"\d[\d,\-]*", mask):
-            mask = ":" + mask
+        mask = prompt_mask("Named selection or CPPTRAJ mask")
         if name in {s["name"] for s in config["sections"]}:
             print("A section with this name already exists.")
             continue
@@ -319,28 +542,23 @@ def wizard(root, config_path, quick=None):
         raise ValueError("Select at least one section.")
     default_fit = "representative" if "representative" in info["selections"] else config["sections"][0]["mask"]
     print("\nThe global fit removes translation/rotation. For relative domain motion, choose the stable reference domain/core.")
-    config["fit_mask"] = ask("Global alignment mask", default_fit)
+    config["fit_mask"] = prompt_mask("Global alignment mask", default_fit)
     reference = ask("Reference structure/trajectory path, or auto for first selected frame of replica 1", "auto")
     config["reference"] = None if reference.lower() == "auto" else str(Path(reference).expanduser().resolve())
     default_image = "auto" if info["periodic"] is not None else "off"
     print("Imaging requires periodic box data. Multi-chain complexes may need a carefully chosen anchor.")
     config["imaging"]["mode"] = ask("Imaging: auto/on/off", default_image, str.lower, lambda s: s in {"auto", "on", "off"})
     if config["imaging"]["mode"] != "off":
-        anchor = ask("Imaging anchor mask, or default for CPPTRAJ's first molecule", "default")
+        anchor = prompt_mask("Imaging anchor mask, or default for CPPTRAJ's first molecule", "default")
         config["imaging"]["anchor"] = None if anchor == "default" else anchor
-    print("\nFrame selection applies to each replica's joined chunks, with one global stride across chunk boundaries.")
-    config["frames"]["start"] = ask("First frame to analyze (discard equilibration before this)", 1, int, lambda x: x > 0)
-    config["frames"]["stop"] = ask("Last frame (-1 = end)", -1, int, lambda x: x == -1 or x >= config["frames"]["start"])
-    config["frames"]["stride"] = ask("Keep every Nth saved frame", 1, int, lambda x: x > 0)
-    print("The saved-frame interval is timestep × output frequency, BEFORE this analysis stride. All chunks must use the same interval.")
-    dt = ask("Saved-frame interval in ps (0 = unknown; use frame axes)", 0.0, float, lambda x: x >= 0)
-    config["frames"]["dt_ps"] = dt or None
     print("\nAnalysis levels:")
     for level, names in LEVELS.items():
         print(f"  {level}: {', '.join(sorted(names))}")
     print("Inapplicable protein/DNA-specific actions are omitted. Advanced PCA/clustering can require substantial RAM.")
     config["analysis"]["level"] = ask("Analysis level", "standard", str.lower, lambda x: x in LEVELS)
     additional_analyses(config, info)
+    configure_convergence(config)
+    configure_clustering(config, info)
     enabled = enabled_analyses(config)
     if "nastruct" in enabled:
         residues = ask("NAStruct residue range (e.g. 121-144), or all", "all")
@@ -357,14 +575,10 @@ def wizard(root, config_path, quick=None):
         if "contacts" in enabled:
             config["interactions"][-1]["contact_cutoff"] = ask("Contact cutoff in angstroms", 4.5, float, lambda x: x > 0)
     if enabled & {"dccm", "pca", "cluster", "pairwise_rmsd"}:
-        config["advanced"]["matrix_mask"] = ask("Advanced coordinate mask (CA + nucleic C4' recommended)", default_fit)
+        config["advanced"]["matrix_mask"] = prompt_mask("Advanced coordinate mask (CA + nucleic C4' recommended)", config["advanced"]["matrix_mask"] if "cluster" in enabled else default_fit)
     if "pca" in enabled:
         config["advanced"]["pca_modes"] = ask("Number of principal components", 3, int, lambda x: x > 0)
-    if "cluster" in enabled:
-        config["advanced"]["cluster_count"] = ask("K-means cluster count (exploratory; tune for your system)", 5, int, lambda x: x > 0)
-        config["advanced"]["cluster_sieve"] = ask("Clustering sieve (fit every Nth analyzed frame; assign the others)", 10, int, lambda x: x > 0)
-    if enabled & {"dccm", "pca", "cluster", "pairwise_rmsd"}:
-        print("Default limits: 20,000 pooled frames, 2,000 selected atoms, conservative 4 GiB estimate. Adjust explicitly in JSON if needed.")
+    configure_resource_limits(config, length_replicas)
     config["stats"]["block_size"] = ask("Block size in analyzed frames for block-mean diagnostics", 50, int, lambda x: x >= 2)
     return finish_wizard(config, config_path, root)
 
@@ -486,6 +700,7 @@ def main(argv=None):
                 "dccm": "Aligned-coordinate dynamic cross-correlation matrices",
                 "pca": "Shared pooled principal components and replica projections",
                 "cluster": "Shared pooled structural clustering and replica populations",
+                "stacking": "Confirmed bond-graph pi systems, per-pair and per-residue replica occupancies",
                 "pairwise_rmsd": "Pairwise frame RMSD matrix; potentially expensive",
             }
             for name in ([args.analysis] if args.analysis else sorted(KNOWN_ANALYSES)):

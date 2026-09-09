@@ -73,7 +73,7 @@ def write_methods(config, manifest, output):
                      ", ".join(f"{b['name']}={b['status']}" for b in rep.get("batches", [])))
     for job in manifest.get("pooled", []):
         lines.append(f"- Shared {job['name']}: {job['status']}")
-    lines += ["", "## Selections and parameters", "", "```json", json.dumps({key: config.get(key) for key in ("sections", "interactions", "monitors", "nucleic", "advanced", "diagnostics", "stats")}, indent=2), "```", "",
+    lines += ["", "## Selections and parameters", "", "```json", json.dumps({key: config.get(key) for key in ("sections", "interactions", "monitors", "nucleic", "advanced", "diagnostics", "convergence", "stacking", "stats")}, indent=2), "```", "",
               "## Interpretation", "", "Independent replicas remain the sampling units. Replica summaries weight available replica means equally; pooled PCA/clustering bases weight input frames. Appended plots do not imply temporal continuity between replicas. Failed analyses must not be described as successfully completed.", "",
               "Sampling diagnostics, when enabled, assume stationarity and do not select an equilibration cutoff. Histogram Jensen–Shannon distances describe observed distribution differences; they are not hypothesis tests or convergence certificates.", "",
               "## References", "", "- Roe & Cheatham (2013), PTRAJ and CPPTRAJ: https://doi.org/10.1021/ct400341p",

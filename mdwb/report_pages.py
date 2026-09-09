@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+from .figure_names import LAG_EXPLANATION
 import hashlib
 import html
 import math
@@ -52,6 +53,8 @@ def _link(path, label):
 
 
 GUIDANCE = {
+    "stacking": "Inspect confirmed pi-system atoms and the centroid-distance/plane-angle criteria. Occupancies are geometric contacts, not interaction energies or lifetimes. Replica SD describes the spread of occupancy percentages; retain zero-occupancy pairs and review missing geometry.",
+    "stacking_any": "A target/residue is occupied when any confirmed partner meets the stacking criteria. Simultaneous contacts count once; incomplete partner data prevent a whole-frame union estimate.",
     "rdf": "Inspect pair selections, box-volume normalization and the radial cutoff before comparing peaks; a heterogeneous solute environment need not approach g(r)=1, and peaks alone do not establish coordination numbers.",
     "watershell": "Inner and outer counts are cumulative, so the outer count includes the inner population; these geometric counts are not residence times, and complete one-residue solvent molecules give consistent CPU/CUDA definitions.",
     "rmsd": "Inspect plateaus, transitions and replica distributions. A flat RMSD can coexist with an unvisited state. Compare global and local fits to distinguish domain motion from internal deformation.",
@@ -136,11 +139,18 @@ def write_review_pages(config, manifest, summary, output):
 
     finding_table = _table(findings, [("subject", "Observable / scope"), ("evidence", "Recorded evidence"), ("advice", "What to inspect next")])
     body = '<section><h2>Items for scientific review</h2><p>These deterministic screening notes do not assign a convergence score. Absence of flags does not establish adequate exploration. Equilibration, stationarity and observable relevance require scientific judgment.</p>' + finding_table + '<p>' + _link("reports/review_findings.dat", "Download all review items") + '</p></section>'
-    body += '<section><h2>Autocorrelation and changes over time</h2><p>ESS and SEM assume stationary sampling. Compare the second-half minus first-half mean with the original trace and its within-replica variability; this difference is descriptive, not a significance test. ACF estimates omit circular and categorical signals. Inspect their state populations and transitions separately.</p>'
+    body += '<section><h2>Autocorrelation and changes over time</h2><p>' + LAG_EXPLANATION + '</p><p>ESS and SEM assume stationary sampling. Compare the second-half minus first-half mean with the original trace and its within-replica variability; this difference is descriptive, not a significance test. ACF estimates omit circular and categorical signals. Inspect their state populations and transitions separately.</p>'
     body += _table(sampling, [("replica", "Replica"), *identity, ("unit", "Unit"), ("status", "Estimate status"), ("n", "Samples"), ("effective_samples_estimate", "Estimated ESS"), ("sem_under_stationarity", "Conditional SEM"), ("second_minus_first_half_mean", "Second − first half mean")])
     if enabled:
         body += '<p>' + _link("reports/diagnostics/sampling.dat", "Full sampling table") + ' · ' + _link("reports/diagnostics/README.md", "Estimator definitions and limitations") + '</p>'
     body += '</section>'
+    if summary.get("convergence", {}).get("enabled"):
+        body += '<section><h2>Convergence over time</h2><p>Cumulative and trailing-window comparisons share an elapsed-time horizon. Self-derived pooled/tail references are descriptive targets, not independent gold standards. SD describes fluctuations, not uncertainty in the mean. Classical split R-hat assumes comparable independent replicas and is not rank-normalized; no automatic convergence threshold is applied.</p>'
+        body += _table(_read(output, "convergence/within_replica.dat"), [("metric", "Metric"), ("replica", "Replica"), ("elapsed", "Elapsed"), ("coordinate_unit", "Axis unit"), ("scope", "Scope"), ("mean", "Mean"), ("sd", "SD"), ("mean_error", "Reference mean difference"), ("reference_js_distance", "Reference JS distance")])
+        body += _table(_read(output, "convergence/between_replicas.dat"), [("metric", "Metric"), ("replica_a", "Replica A"), ("replica_b", "Replica B"), ("elapsed", "Elapsed"), ("scope", "Scope"), ("js_distance", "JS distance"), ("all_replica_classical_split_rhat", "All-replica classical split R-hat")])
+        for name in ("within_replica", "between_replicas", "state_populations", "references", "reference_histograms", "omissions"):
+            body += '<p>' + _link(f"reports/convergence/{name}.dat", name.replace('_', ' ')) + '</p>'
+        body += '</section>'
     page("sampling.html", "Sampling and convergence review", body)
 
     body = '<section><h2>How to interpret the different standard deviations</h2><p><strong>Within-replica SD</strong> describes fluctuations of an observable along one trajectory. <strong>SD of replica means</strong> describes the spread of the independent simulation averages, with each available replica weighted equally. <strong>Block-mean SD</strong> describes complete contiguous block averages within a replica. None of these is automatically a confidence interval.</p><p>With one replica the between-replica SD is unavailable, not zero. Similar means can conceal different distributions. A large spread needs inspection of state populations, setup differences and sampling; there is no universal acceptable SD across observables and units.</p></section>'
@@ -152,6 +162,12 @@ def write_review_pages(config, manifest, summary, output):
         body += '<p>' + _link("reports/diagnostics/replica_distribution_distance.dat", "Full distribution comparisons") + '</p>'
     body += '</section><section><h2>Circular and categorical observables</h2><p>Torsion means and spreads use circular definitions; secondary-structure states use fractions. Linear SDs are not substituted.</p>'
     body += _table(circular, identity + [("n_replicas", "Replicas"), ("equal_replica_circular_mean_degree", "Circular mean (degrees)"), ("between_replica_circular_sd_degree", "Circular spread (degrees)")]) + '</section>'
+    if summary.get("stacking", {}).get("enabled"):
+        body += '<section><h2>Pi-stacking occupancies</h2><p>Each replica contributes one occupancy fraction. The mean weights replicas equally; SD is the sample SD of replica occupancies (percentage points), unavailable for one replica. Target and residue occupancies count frames with any partner, without summing simultaneous contacts. Missing or invalid geometry is not counted as an unstacked frame; incomplete replicas are excluded from aggregate statistics and identified explicitly.</p>'
+        body += _table(_read(output, "stacking/replica_summary.dat"), [("scope", "Scope"), ("display_name", "Pi system / pair"), ("n_replicas_complete", "Complete replicas"), ("n_replicas_requested", "Requested replicas"), ("mean_percent", "Mean occupancy (%)"), ("sd_percentage_points", "Replica SD (percentage points)"), ("status", "Status")])
+        for name in ("per_replica", "replica_summary", "pairs", "rings", "criteria", "omissions"):
+            body += '<p>' + _link(f"reports/stacking/{name}.dat", name.replace('_',' ')) + '</p>'
+        body += '</section>'
     page("replicas.html", "Replica agreement and variability", body)
 
     analysis_pages = []

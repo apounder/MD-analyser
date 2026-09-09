@@ -22,6 +22,21 @@ filename in the run command. Omit `--quick` for the full guided setup.
 For clusters, copy only `mdworkbench.pyz` and substitute that filename for
 `mdworkbench.py` in these commands. The same environment prerequisites apply.
 
+After analysis selection, both setup paths offer resource limits for PCA,
+clustering and pairwise RMSD: maximum pooled frames, selected atoms and estimated
+memory (GiB). The pooled total includes all replicas after trimming and stride.
+If it exceeds the current cap, the wizard suggests a cap covering all selected
+frames without changing the global stride. For three 20,000-frame replicas,
+keeping every frame requires `advanced.max_frames` of at least 60,000.
+Clustering has its own `advanced.cluster_sieve`: clusters are fitted to a random
+1/N subset and remaining frames are assigned afterward. This leaves sampling
+for other analyses unchanged. Keep the global analysis stride at 1 to analyze
+every saved frame. Raising the frame cap does not bypass the memory guard.
+DCCM offers atom and memory limits.
+Existing saved JSON configurations can set these under `advanced` using
+`max_frames`, `max_matrix_atoms` and `max_memory_gb`; running a saved configuration
+does not repeat setup prompts.
+
 ## What it provides
 
 - Any number of ordered trajectory segments per replica; combined `.dat` tables
@@ -50,6 +65,12 @@ python mdworkbench.py bundle analysis_results --destination study_results.zip
 `--no-plots` retains numerical/HTML previews without Matplotlib. Open the included
 [example report](examples/rendered/index.html) after downloading/cloning this
 repository; it uses synthetic curves and an unrelated experimental structure.
+
+See [convergence and geometry clustering](docs/CONVERGENCE.md) for cumulative/windowed
+replica comparisons, pooled/last-ns/custom reference targets, and QM/MM geometry features.
+
+[Pi-stacking from residue numbers](docs/STACKING.md) discovers candidate rings for
+confirmation and naming, then reports per-pair/per-residue occupancy and replica mean/SD.
 
 ## Scope and guidance
 

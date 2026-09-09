@@ -29,11 +29,11 @@ def residue_range(indices):
     return ",".join(chunks)
 
 
-def _amber_flags(path):
+def _amber_flags(path, extra_flags=()):
     result = {}
     key = None
     width = 0
-    keep = {"POINTERS", "RESIDUE_LABEL", "RESIDUE_POINTER", "ATOM_NAME"}
+    keep = {"POINTERS", "RESIDUE_LABEL", "RESIDUE_POINTER", "ATOM_NAME"} | set(extra_flags)
     opener = gzip.open if Path(path).suffix.lower() == ".gz" else open
     with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
         for line in handle:

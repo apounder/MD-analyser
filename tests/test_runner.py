@@ -221,7 +221,8 @@ class ProcessBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             log = Path(temp) / "failure.log"
             def failed_process(command, **kwargs):
-                self.assertEqual(command, ["cpptraj", "-i", "a path/input.in"])
+                self.assertEqual(command[:2], ["cpptraj", "-i"])
+                self.assertEqual((Path(kwargs["cwd"]) / command[2]).resolve(), Path(temp) / "a path/input.in")
                 self.assertNotIn("shell", kwargs)
                 kwargs["stdout"].write("Details before failure\nError: invalid atom mask\n")
                 return subprocess.CompletedProcess(command, 2)

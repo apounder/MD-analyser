@@ -45,7 +45,7 @@ HELP = [
     ("advanced coordinate", "A compact representative atom set makes covariance and clustering calculations more manageable."),
     ("principal components", "Retain enough common-basis modes to inspect important motions without assuming the first modes capture all sampling."),
     ("cluster count", "Choose an exploratory number of structural groups and inspect how results depend on that choice."),
-    ("clustering sieve", "Fit clusters to every Nth analyzed frame and assign the remaining frames to reduce the fitting cost."),
+    ("clustering sieve", "Fit clusters to a random 1/N subset and assign the remaining frames. This reduces clustering cost without changing sampling for other analyses."),
     ("block size", "Choose contiguous blocks longer than the observable correlation scale before interpreting block variability."),
     ("cpptraj executable", "Use cpptraj from your active environment or supply its full path in the same operating system."),
     ("results directory", "Choose a new empty folder separate from the original simulation inputs."),

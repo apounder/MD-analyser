@@ -20,6 +20,7 @@ from typing import Any, Iterable
 import numpy as np
 
 
+from .figure_names import metric_figure_stem
 from .figure_style import PALETTES
 from .labels import analysis_label, readable, observable_label, series_title, unit_label, coordinate_label
 from .distributions import shared_edges, histogram, distribution_rows
@@ -487,14 +488,14 @@ def _series_figures(plt, series_groups: dict, config: dict, output_dir: Path, fi
         first = group[0]
         if first.kind not in {"timeseries", "profile"} or first.discrete:
             continue
-        stem = _safe_name("__".join(key))
+        stem = metric_figure_stem(first.analysis, first.section, first.name, *key)
         title = series_title(first)
         for series in group:
             fig, ax = plt.subplots(figsize=(3.5, 2.65), layout="constrained")
             ax.plot(series.x, _plot_values(series), color=_replica_color(series.replica), alpha=alpha)
             ax.set(xlabel=coordinate_label(series.xunit), ylabel=_ylabel(series), title=series_title(series, readable(series.replica)))
             ax.grid(axis="y", color="#dddddd", linewidth=0.5, alpha=0.6)
-            _save_figure(plt, fig, output_dir / "figures" / _safe_name(series.replica) / f"{stem}.svg", figure_files, output_dir)
+            _save_figure(plt, fig, output_dir / "figures" / _safe_name(series.replica) / f"{stem}__{_safe_name(series.replica)}__{first.kind}.svg", figure_files, output_dir)
         if len(group) > 1:
             fig, ax = plt.subplots(figsize=(7, 3.15), layout="constrained")
             for i, series in enumerate(group):
@@ -502,7 +503,7 @@ def _series_figures(plt, series_groups: dict, config: dict, output_dir: Path, fi
             ax.set(xlabel=coordinate_label(first.xunit), ylabel=_ylabel(first), title=series_title(first, "Replica comparison"))
             ax.legend(frameon=False, ncols=min(4, len(group)), loc="best")
             ax.grid(axis="y", color="#dddddd", linewidth=0.5, alpha=0.6)
-            _save_figure(plt, fig, output_dir / "figures" / "overlays" / f"{stem}.svg", figure_files, output_dir)
+            _save_figure(plt, fig, output_dir / "figures" / "overlays" / f"{stem}__replica-comparison.svg", figure_files, output_dir)
         if first.kind == "timeseries":
             # Every line is drawn separately: no visual connection across replicas.
             if len(group) > 1:
@@ -517,7 +518,7 @@ def _series_figures(plt, series_groups: dict, config: dict, output_dir: Path, fi
                     ax.axvline(boundary, color="#555555", ls="--", lw=0.7, alpha=0.7)
                 ax.set(xlabel=f"Appended {first.xunit} (independent replicas; display only)", ylabel=_ylabel(first), title=series_title(first, "Replicas shown in sequence"))
                 ax.legend(frameon=False, ncols=min(4, len(group)))
-                _save_figure(plt, fig, output_dir / "figures" / "concatenated" / f"{stem}.svg", figure_files, output_dir)
+                _save_figure(plt, fig, output_dir / "figures" / "concatenated" / f"{stem}__replicas-in-sequence.svg", figure_files, output_dir)
             _distribution_figures(plt, group, output_dir, figure_files, stem, alpha)
             edges = shared_edges(group)
             fig, axes = plt.subplots(1, 2, figsize=(7, 3.5), layout="constrained")
@@ -533,7 +534,7 @@ def _series_figures(plt, series_groups: dict, config: dict, output_dir: Path, fi
             axes[1].set(xlabel=coordinate_label(first.xunit), ylabel=_ylabel(first), title="Running circular mean" if first.circular else "Running mean")
             axes[1].legend(frameon=False, ncols=1)
             fig.suptitle(title)
-            _save_figure(plt, fig, output_dir / "figures" / "diagnostics" / f"{stem}.svg", figure_files, output_dir)
+            _save_figure(plt, fig, output_dir / "figures" / "diagnostics" / f"{stem}__distribution-and-running-mean.svg", figure_files, output_dir)
 
 
 def _density_label(series):
@@ -559,7 +560,7 @@ def _distribution_figures(plt, group, output_dir, files, stem, alpha):
                title=series_title(group[0], f"Probability distribution · {context}"), ylim=(0, None))
         ax.legend(ncols=min(3, len(selection)), loc="best")
         ax.grid(axis="y", color="#dddddd", linewidth=0.5, alpha=0.6)
-        _save_figure(plt, fig, output_dir / "figures" / "distributions" / folder / f"{stem}.svg", files, output_dir)
+        _save_figure(plt, fig, output_dir / "figures" / "distributions" / folder / f"{stem}__{folder}__probability-distribution.svg", files, output_dir)
 
 
 def _pca_figures(plt, series_list: list[Series], output_dir: Path, files: list[str]):
@@ -793,10 +794,10 @@ def _diagnostic_figures(plt, output, files, figure_analyses):
             data = np.loadtxt(output / row["path"], skiprows=1, ndmin=2)
             ax.plot(data[:, 1], data[:, 2], label=row["replica"], color=_replica_color(row["replica"]), alpha=0.8)
         ax.axhline(0, color="#666666", linewidth=0.7)
-        ax.set(xlabel=f"Lag ({key[3]})", ylabel="Autocorrelation", title=f"{analysis_label(key[0])} · Autocorrelation\n{readable(key[1])} · {readable(key[2])}")
+        ax.set(xlabel=f"Separation between observations / lag ({key[3]})", ylabel="Autocorrelation", title=f"{analysis_label(key[0])} · Autocorrelation\n{readable(key[1])} · {readable(key[2])}")
         ax.legend(fontsize=8)
-        token = hashlib.sha256("|".join(key).encode()).hexdigest()[:16]
-        _save_figure(plt, fig, output / "figures" / "diagnostics" / f"acf_{token}.svg", files, output)
+        token = metric_figure_stem(*key)
+        _save_figure(plt, fig, output / "figures" / "diagnostics" / f"{token}__autocorrelation.svg", files, output)
         figure_analyses[files[-1]] = key[0]
     groups.clear()
     with (directory / "replica_distribution_distance.dat").open(encoding="utf-8", newline="") as handle:
@@ -817,8 +818,8 @@ def _diagnostic_figures(plt, output, files, figure_analyses):
         ax.set_yticks(positions, [names[i] for i in positions])
         ax.set_title(f"{analysis_label(key[0])}\n{readable(key[1])} · {readable(key[2])}\nBetween-replica distribution differences")
         fig.colorbar(plotted, ax=ax, label="Jensen–Shannon distance (base 2)")
-        token = hashlib.sha256("|".join(key).encode()).hexdigest()[:16]
-        _save_figure(plt, fig, output / "figures" / "diagnostics" / f"replica_distance_{token}.svg", files, output)
+        token = metric_figure_stem(*key)
+        _save_figure(plt, fig, output / "figures" / "diagnostics" / f"{token}__between-replica-distribution-distance.svg", files, output)
         figure_analyses[files[-1]] = key[0]
 
 
@@ -879,6 +880,14 @@ def report_results(config: dict, manifest: dict, output_dir: str | Path) -> dict
                     artifact_index.append((replica, status, analysis, section, kind, unit, parsed_status, str(source)))
                     continue
                 table = parse_numeric_table(source)
+                if metadata.get("format") == "stacking_geometry":
+                    from .stacking import geometry_series
+                    expected = replica_entry.get("frame_count")
+                    if expected is not None and len(table.data) != expected:
+                        raise TableFormatError("Stacking geometry does not cover the planned replica frames")
+                    series_list.extend(geometry_series(replica, artifact, table, config, str(source)))
+                    artifact_index.append((replica, status, analysis, section, kind, unit, parsed_status, str(source)))
+                    continue
                 if kind == "matrix":
                     matrices.append(_matrix_from_table(replica, artifact, table, str(source)))
                 elif kind in {"timeseries", "profile"}:
@@ -906,6 +915,11 @@ def report_results(config: dict, manifest: dict, output_dir: str | Path) -> dict
                 parsed_status = "unparsed"
                 warnings.append(f"{replica}/{analysis}/{section}: {exc}; original artifact retained")
             artifact_index.append((replica, status, analysis, section, kind, unit, parsed_status, str(source)))
+    from .stacking import write_stacking_report
+    stacking_summary, stacking_unions = write_stacking_report(config, series_list, manifest, output_dir)
+    series_list.extend(stacking_unions)
+    if stacking_summary.get("omissions"):
+        warnings.append(f"Stacking: {stacking_summary['omissions']} incomplete pair/target/residue replica results; see reports/stacking/omissions.dat")
     series_groups: dict[tuple, list[Series]] = defaultdict(list)
     for series in series_list:
         series_groups[series.key].append(series)
@@ -940,6 +954,8 @@ def report_results(config: dict, manifest: dict, output_dir: str | Path) -> dict
     _series_tables(series_groups, output_dir, int(config.get("stats", {}).get("block_size", 50)), warnings)
     from .diagnostics import write_diagnostics
     diagnostic_summary = write_diagnostics(config, series_list, output_dir)
+    from .convergence import write_convergence
+    convergence_summary = write_convergence(config, series_list, output_dir)
     if config.get("stats", {}).get("metric_correlations", False):
         _scalar_correlations(series_list, output_dir, warnings)
     figure_files: list[str] = []
@@ -964,6 +980,14 @@ def report_results(config: dict, manifest: dict, output_dir: str | Path) -> dict
                 plots_status = "partial"
                 plt.close("all")
                 warnings.append(f"Diagnostic SVG rendering failed: {exc}; diagnostic tables remain available")
+        if convergence_summary.get("enabled"):
+            try:
+                from .convergence import plot_convergence
+                plot_convergence(plt, output_dir, _save_figure, figure_files, figure_analyses)
+            except (OSError, ValueError, RuntimeError, OverflowError) as exc:
+                plots_status = "partial"
+                plt.close("all")
+                warnings.append(f"Convergence SVG rendering failed: {exc}; numerical tables remain available")
         for key, group in series_groups.items():
             before = len(figure_files)
             try:
@@ -1006,6 +1030,8 @@ def report_results(config: dict, manifest: dict, output_dir: str | Path) -> dict
     data_replica_names = {series.replica for series in series_list} | {matrix.replica for matrix in matrices} | {item[0] for item in generic_tables}
     summary = {"status": "complete_with_warnings" if warnings else "complete", "plots_status": plots_status, "replicas_requested": len(replica_entries), "replicas_with_numeric_data": len(data_replica_names & actual_replica_names), "pooled_groups_requested": len(pooled_entries), "series_count": len(series_list), "matrix_count": len(matrices), "figures": figure_files, "combined_data": str(output_dir / "reports" / "all_replicas.dat"), "warnings": warnings, "notes": notes}
     summary["diagnostics"] = diagnostic_summary
+    summary["convergence"] = convergence_summary
+    summary["stacking"] = stacking_summary
     summary["figure_style"] = getattr(plt, "_mdwb_style", None) if plt is not None else None
     summary["figure_analyses"] = figure_analyses
     summary["figure_titles"] = getattr(plt, "_mdwb_figure_titles", {}) if plt is not None else {}
